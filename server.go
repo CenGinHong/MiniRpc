@@ -8,10 +8,17 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"reflect"
 	"strings"
 	"sync"
 	"time"
+)
+
+const (
+	connected        = "200 Connected to MiniRPC"
+	defaultRPCPath   = "/_minirpc/"
+	defaultDebugPath = "/debug/minirpc" // 后续debug所预留的地址
 )
 
 func Accept(lis net.Listener) { DefaultServer.Accept(lis) }
@@ -38,6 +45,40 @@ var DefaultOption = &Option{
 
 type Server struct {
 	serviceMap sync.Map // 安全map
+}
+
+// ServeHTTP 接受HTTP的CONNECT请求，并回应RPC请求
+func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	// 仅接受CONNECT请求
+	if req.Method != "CONNECT" {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		_, _ = io.WriteString(w, "405 must CONNECT\n")
+		return
+	}
+	// 劫持http请求，即接管了http请求
+	// 这里接管了 HTTP 的 Socket 连接，
+	// HTTP 库和 HTTPServer 库将不会管理这个 Socket 连接的生命周期，这个生命周期已经划给 Hijacker 了,然后基于http连接来进行rpc过程
+	conn, _, err := w.(http.Hijacker).Hijack()
+	if err != nil {
+		log.Print("rpc hijacking ", req.RemoteAddr, ": ", err.Error())
+	}
+	// 写回
+	_, _ = io.WriteString(conn, "HTTP/1.0 "+connected+"\n\n")
+	// 使用该连接进行rpc
+	s.ServeConn(conn)
+}
+
+func (s *Server) HandleHTTP() {
+	// 监听rpc地址提供rpc调用
+	http.Handle(defaultRPCPath, s)
+	// 监听debug提供文本协议
+	http.Handle(defaultDebugPath, debugHTTP{s})
+	log.Println("rpc server debug path:", defaultDebugPath)
+}
+
+func HandleHTTP() {
+	DefaultServer.HandleHTTP()
 }
 
 func (s *Server) Register(rcvr interface{}) error {
@@ -100,10 +141,7 @@ func (s *Server) Accept(lis net.Listener) {
 func (s *Server) ServeConn(conn io.ReadWriteCloser) {
 	defer func() {
 		// 处理完成，关闭conn
-		if err := conn.Close(); err != nil {
-			log.Println("rpc Server: conn close error:", err)
-			return
-		}
+		_ = conn.Close()
 	}()
 	var opt Option
 	// 解码Option

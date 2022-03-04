@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net"
+	"net/http"
 	"sync"
 	"time"
 )
@@ -22,51 +23,46 @@ func (f Foo) Sum(args Args, reply *int) error {
 
 func startServer(addr chan string) {
 	var foo Foo
-	// 注册结构体
-	if err := Register(&foo); err != nil {
-		log.Fatal("register error:", err)
-	}
-	l, err := net.Listen("tcp", ":0")
-	if err != nil {
-		log.Fatalln("network error:", err)
-	}
-	log.Println("start rpc server on:", l.Addr())
-	// 将开启的服务端地址返回
+	// 监听这个tcp端口
+	l, _ := net.Listen("tcp", ":9999")
+	// 注册结构体成为被调用服务
+	_ = Register(&foo)
+	// 监听不同地址提供服务服务
+	HandleHTTP()
+	// 将监听的地址写入chan
 	addr <- l.Addr().String()
-	Accept(l)
+	_ = http.Serve(l, nil)
 }
 
-func main() {
-	log.SetFlags(0)
-	addr := make(chan string)
-	// 起一个协程负责接受请求
-	go startServer(addr)
-	// 模拟客户端
-	client, err := Dial("tcp", <-addr)
-	if err != nil {
-		log.Fatalln("rpc Client: client dial error: ", client)
-		return
-	}
-	defer func() {
-		_ = client.Close()
-	}()
+func call(addr chan string) {
+
+	c, _ := DialHTTP("tcp", <-addr)
+	defer func(c *Client) {
+		_ = c.Close()
+	}(c)
 	time.Sleep(time.Second)
 	var wg sync.WaitGroup
 	for i := 0; i < 5; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			// 新建参数
 			args := &Args{Num1: i, Num2: i * i}
 			var reply int
-			// 发送请求
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second*2)
-			defer cancel()
-			if err = client.Call(ctx, "Foo.Sum", args, &reply); err != nil {
-				log.Fatal("call Foo.Sum error:", err)
+			if err := c.Call(context.Background(), "Foo.Sum", args, &reply); err != nil {
+				return
 			}
-			log.Printf("reply: %d + %d = %d", args.Num1, args.Num2, reply)
+			log.Printf("%d + %d = %d", args.Num1, args.Num2, reply)
 		}(i)
 	}
 	wg.Wait()
+}
+
+func main() {
+	log.SetFlags(0)
+	// 地址
+	ch := make(chan string)
+	// 客户端逻辑
+	go call(ch)
+	// 服务端逻辑
+	startServer(ch)
 }

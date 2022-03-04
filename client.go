@@ -2,6 +2,7 @@ package main
 
 import (
 	"MiniRpc/codec"
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,8 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -38,6 +41,28 @@ type Client struct {
 	pending  map[uint64]*Call // 存储未处理完的请求，该map的值当请求失败或者收到恢复才可以移除
 	closing  bool             // 标识client是否可用，这个用于用户主动关闭
 	shutdown bool             // 标识client是否可用，这个用于有错误时关闭
+}
+
+func XDial(rpcAddr string, opts ...*Option) (*Client, error) {
+	// 切分协议
+	parts := strings.Split(rpcAddr, "@")
+	// 错误格式
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("rpc client err: wrong format '%s', expect protocol@addr", rpcAddr)
+	}
+	protocol, addr := parts[0], parts[1]
+	switch protocol {
+	case "http":
+		{
+			// 基于http请求
+			return DialHTTP("tcp", addr, opts...)
+		}
+	default:
+		{
+			// 其他网络协议
+			return Dial(protocol, addr, opts...)
+		}
+	}
 }
 
 func (c *Client) Close() error {
@@ -108,7 +133,7 @@ type clientResult struct {
 
 type newClientFunc func(conn net.Conn, option *Option) (client *Client, err error)
 
-// dialTimeout 结果连接上的超时
+// dialTimeout 带超时连接并创建客户端，客户端是使用创建的conn来创建的
 func dialTimeout(f newClientFunc, network, address string, opts ...*Option) (client *Client, err error) {
 	// 解析opt
 	opt, err := parseOptions(opts...)
@@ -202,12 +227,28 @@ func NewClient(conn net.Conn, opt *Option) (*Client, error) {
 		log.Println("rpc Client: codec error: ", err)
 		return nil, err
 	}
+	// 将opt先写入
 	if err := json.NewEncoder(conn).Encode(opt); err != nil {
 		log.Println("rpc client: options error: ", err)
 		_ = conn.Close()
 		return nil, err
 	}
 	return newClientCodec(f(conn), opt), nil
+}
+
+func NewHTTPClient(conn net.Conn, opt *Option) (*Client, error) {
+	// 写入信道
+	_, _ = io.WriteString(conn, fmt.Sprintf("CONNECT %s HTTP/1.0\n\n", defaultRPCPath))
+	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: "CONNECT"})
+	// 使用CONNECT握手后连接成功创建客户端
+	if err == nil && resp.Status == connected {
+		return NewClient(conn, opt)
+	}
+	// 连接失败
+	if err == nil {
+		err = errors.New("unexpected HTTP response " + resp.Status)
+	}
+	return nil, err
 }
 
 func newClientCodec(cc codec.Codec, opt *Option) *Client {
@@ -241,6 +282,11 @@ func parseOptions(opts ...*Option) (*Option, error) {
 
 func Dial(network string, address string, opts ...*Option) (client *Client, err error) {
 	return dialTimeout(NewClient, network, address, opts...)
+}
+
+// DialHTTP 连接到一个有具体地址的HTTP RPC 服务器
+func DialHTTP(network string, address string, opts ...*Option) (*Client, error) {
+	return dialTimeout(NewHTTPClient, network, address, opts...)
 }
 
 func (c *Client) send(call *Call) {
