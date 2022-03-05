@@ -1,4 +1,4 @@
-package main
+package MiniRpc
 
 import (
 	"MiniRpc/codec"
@@ -337,6 +337,7 @@ func (c *Client) Call(ctx context.Context, serviceMethod string, args interface{
 	// 使用context引入超时控制,这里的时间包括从发送请求到接受回来收到结果
 	call := c.Go(serviceMethod, args, reply, make(chan *Call, 1))
 	select {
+	// ctx.Done不只是超时，也有可能被cancel掉
 	case <-ctx.Done():
 		{
 			// 超时，移除请求
